@@ -1,0 +1,10 @@
+# 実行ファイル
+*.exe
+tmp/
+
+# SQLite データベース
+*.db
+*.db-journal
+
+# Go の依存関係（通常はアップロードしない）
+vendor/

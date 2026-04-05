@@ -3,35 +3,45 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Note Clone</title>
+    <title>My Note Clone - Full CRUD</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px; background-color: #f8f9fa; color: #333; }
         h1 { color: #2cb696; border-bottom: 2px solid #2cb696; padding-bottom: 10px; }
         
+        /* フォームのスタイル */
         .post-form-container { background: white; padding: 24px; margin-bottom: 30px; border-radius: 12px; border: 2px solid #2cb696; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
-        input, textarea { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
-        textarea { height: 100px; }
-        .submit-btn { background: #2cb696; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; }
+        input, textarea { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; font-size: 1rem; }
+        textarea { height: 120px; }
+        
+        .btn-group { display: flex; gap: 10px; }
+        .submit-btn { background: #2cb696; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-weight: bold; flex: 2; }
+        .cancel-btn { background: #999; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; flex: 1; display: none; }
 
-        .article-card { background: white; padding: 24px; margin-bottom: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); position: relative; }
-        h2 { margin-top: 0; padding-right: 60px; }
+        /* 記事カード */
+        .article-card { background: white; padding: 24px; margin-bottom: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        h2 { margin-top: 0; color: #1a1a1a; }
         p { line-height: 1.8; color: #444; white-space: pre-wrap; }
         
         .meta { font-size: 0.85rem; color: #999; margin-top: 15px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; padding-top: 10px; }
         
-        /* 削除ボタンのスタイル */
-        .delete-btn { background: #ff4d4f; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; }
-        .delete-btn:hover { background: #d9363e; }
+        /* ボタン類 */
+        .action-btns { display: flex; gap: 8px; }
+        .edit-btn { background: #2c7fb6; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+        .delete-btn { background: #ff4d4f; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
     </style>
 </head>
 <body>
     <h1>📝 My Note Clone</h1>
 
     <div class="post-form-container">
+        <h3 id="form-title">🆕 新しい記事を書く</h3>
         <form id="article-form">
             <input type="text" id="title" placeholder="タイトル" required>
             <textarea id="content" placeholder="本文を入力..." required></textarea>
-            <button type="submit" class="submit-btn">投稿する</button>
+            <div class="btn-group">
+                <button type="submit" id="submit-button" class="submit-btn">投稿する</button>
+                <button type="button" id="cancel-button" class="cancel-btn" onclick="resetForm()">キャンセル</button>
+            </div>
         </form>
     </div>
 
@@ -42,7 +52,10 @@
             <p>{{ .Content }}</p>
             <div class="meta">
                 <span>📅 {{ .CreatedAt.Format "2006/01/02 15:04" }}</span>
-                <button class="delete-btn" onclick="deleteArticle('{{ .ID }}')">削除</button>
+                <div class="action-btns">
+                    <button class="edit-btn" onclick="prepareEdit('{{ .ID }}', '{{ .Title }}', '{{ .Content }}')">編集</button>
+                    <button class="delete-btn" onclick="deleteArticle('{{ .ID }}')">削除</button>
+                </div>
             </div>
         </div>
         {{ else }}
@@ -51,42 +64,60 @@
     </div>
 
     <script>
-        // 投稿処理
+        let editingId = null; // 編集中のIDを保持する変数
+
+        // 1. 編集モードに切り替える関数
+        function prepareEdit(id, title, content) {
+            editingId = id;
+            document.getElementById('title').value = title;
+            document.getElementById('content').value = content;
+            
+            // 見た目の切り替え
+            document.getElementById('form-title').innerText = '✏️ 記事を編集する';
+            document.getElementById('submit-button').innerText = '更新する';
+            document.getElementById('cancel-button').style.display = 'block';
+            
+            // フォームまでスクロール
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+
+        // 2. フォームをリセットする関数
+        function resetForm() {
+            editingId = null;
+            document.getElementById('article-form').reset();
+            document.getElementById('form-title').innerText = '🆕 新しい記事を書く';
+            document.getElementById('submit-button').innerText = '投稿する';
+            document.getElementById('cancel-button').style.display = 'none';
+        }
+
+        // 3. 投稿・更新の実行処理
         document.getElementById('article-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const title = document.getElementById('title').value;
             const content = document.getElementById('content').value;
 
-            const response = await fetch('/articles', {
-                method: 'POST',
+            // 編集なら PUT、新規なら POST を使い分ける
+            const url = editingId ? `/articles/${editingId}` : '/articles';
+            const method = editingId ? 'PUT' : 'POST';
+
+            const response = await fetch(url, {
+                method: method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ title, content })
             });
 
             if (response.ok) {
+                alert(editingId ? '更新しました！' : '投稿しました！');
+                resetForm();
                 location.reload();
             }
         });
 
-        // 削除処理（ここを追加！）
+        // 4. 削除処理
         async function deleteArticle(id) {
-            if (!confirm('この記事を削除してもよろしいですか？')) return;
-
-            try {
-                // URLにIDを含めて DELETE リクエストを送る
-                const response = await fetch(`/articles/${id}`, {
-                    method: 'DELETE'
-                });
-
-                if (response.ok) {
-                    alert('削除しました');
-                    location.reload(); // 画面を更新して消えたことを確認
-                } else {
-                    alert('削除に失敗しました');
-                }
-            } catch (error) {
-                console.error('Error:', error);
-            }
+            if (!confirm('この記事を削除しますか？')) return;
+            const response = await fetch(`/articles/${id}`, { method: 'DELETE' });
+            if (response.ok) location.reload();
         }
     </script>
 </body>

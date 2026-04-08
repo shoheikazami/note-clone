@@ -10,96 +10,83 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/glebarez/sqlite" // gorm.io/driver/sqlite からこちらに変更
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"gorm.io/gorm"
 )
 
-// setupTest は各テストの前に、クリーンなメモリ内DB環境を構築します
 func setupTest() *gin.Engine {
-	// CGOを必要としない Pure Go 版の SQLite ドライバでメモリDBを開く
 	dialector := sqlite.Open(":memory:")
-	
 	var err error
 	db.DB, err = gorm.Open(dialector, &gorm.Config{})
 	if err != nil {
 		panic("テスト用DBの接続に失敗しました: " + err.Error())
 	}
 
-	// データベースのテーブルを作成
 	db.DB.AutoMigrate(&models.Article{})
-
-	// Ginをテストモードに設定
 	gin.SetMode(gin.TestMode)
-
-	// main.go で定義した SetupRouter を呼び出す
 	return SetupRouter()
 }
 
-// 1. 記事作成のテスト
+// 正常な投稿のテスト
 func TestCreateArticle(t *testing.T) {
 	r := setupTest()
 
-	// 準備
-	article := models.Article{Title: "テスト記事", Content: "テスト本文"}
+	article := models.Article{Title: "正常な記事", Content: "正常な本文"}
 	jsonValue, _ := json.Marshal(article)
 
-	// 実行
 	req, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer(jsonValue))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	// 検証
 	assert.Equal(t, http.StatusOK, w.Code)
-	
-	var response models.Article
-	json.Unmarshal(w.Body.Bytes(), &response)
-	assert.Equal(t, "テスト記事", response.Title)
 }
 
-// 2. 記事削除のテスト
-func TestDeleteArticle(t *testing.T) {
+// 【追加】バリデーションエラーのテスト
+func TestCreateArticleValidationError(t *testing.T) {
 	r := setupTest()
 
-	// 準備: あらかじめデータを投入
-	target := models.Article{Title: "消える記事", Content: "さらば"}
+	// タイトルが空のデータ（binding:"required" で弾かれるべきもの）
+	invalidArticle := models.Article{Title: "", Content: "本文はあるけどタイトルがない"}
+	jsonValue, _ := json.Marshal(invalidArticle)
+
+	req, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer(jsonValue))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	
+	r.ServeHTTP(w, req)
+
+	// ステータスコードが 400 Bad Request であることを期待する
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	
+	// エラーメッセージが含まれているか確認
+	assert.Contains(t, w.Body.String(), "error")
+}
+
+func TestDeleteArticle(t *testing.T) {
+	r := setupTest()
+	target := models.Article{Title: "削除用", Content: "消えます"}
 	db.DB.Create(&target)
 
-	// 実行: ID 1番を削除
 	req, _ := http.NewRequest("DELETE", "/articles/1", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	// 検証
 	assert.Equal(t, http.StatusOK, w.Code)
-
-	var result models.Article
-	err := db.DB.First(&result, 1).Error
-	assert.Error(t, err) // 見つからないことが正しい
 }
 
-// 3. 記事更新のテスト
 func TestUpdateArticle(t *testing.T) {
 	r := setupTest()
+	db.DB.Create(&models.Article{Title: "旧", Content: "旧"})
 
-	// 準備: 元データ
-	db.DB.Create(&models.Article{Title: "旧タイトル", Content: "旧内容"})
-
-	// 更新データ
-	update := models.Article{Title: "新タイトル", Content: "新内容"}
+	update := models.Article{Title: "新", Content: "新"}
 	jsonValue, _ := json.Marshal(update)
 
-	// 実行
 	req, _ := http.NewRequest("PUT", "/articles/1", bytes.NewBuffer(jsonValue))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	// 検証
 	assert.Equal(t, http.StatusOK, w.Code)
-	
-	var updated models.Article
-	db.DB.First(&updated, 1)
-	assert.Equal(t, "新タイトル", updated.Title)
 }

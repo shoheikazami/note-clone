@@ -8,36 +8,33 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// SetupRouter はルーターの設定を定義し、テストコードからも呼び出せるようにします
 func SetupRouter() *gin.Engine {
 	r := gin.Default()
-
-	// HTMLテンプレートの読み込み設定
 	r.LoadHTMLGlob("templates/*")
 
-	// --- ルート定義 ---
-
-	// 【GET】 記事一覧を表示
+	// --- 記事一覧 ---
 	r.GET("/articles", func(c *gin.Context) {
 		var articles []models.Article
 		db.DB.Order("id desc").Find(&articles)
-		c.HTML(http.StatusOK, "index.html", gin.H{
-			"articles": articles,
-		})
+		c.HTML(http.StatusOK, "index.html", gin.H{"articles": articles})
 	})
 
-	// 【POST】 記事を新規作成
+	// --- 記事作成 (バリデーション付き) ---
 	r.POST("/articles", func(c *gin.Context) {
 		var article models.Article
+		// ここで models/article.go に書いた binding:"required" がチェックされます
 		if err := c.ShouldBindJSON(&article); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "タイトルと本文を入力してください",
+				"details": err.Error(),
+			})
 			return
 		}
 		db.DB.Create(&article)
 		c.JSON(http.StatusOK, article)
 	})
 
-	// 【PUT】 記事を更新
+	// --- 記事更新 (バリデーション付き) ---
 	r.PUT("/articles/:id", func(c *gin.Context) {
 		id := c.Param("id")
 		var article models.Article
@@ -47,8 +44,9 @@ func SetupRouter() *gin.Engine {
 		}
 
 		var input models.Article
+		// 更新時も空文字を禁止するために ShouldBindJSON を使用
 		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "入力内容が正しくありません"})
 			return
 		}
 
@@ -56,13 +54,10 @@ func SetupRouter() *gin.Engine {
 		c.JSON(http.StatusOK, article)
 	})
 
-	// 【DELETE】 記事を削除
+	// --- 記事削除 ---
 	r.DELETE("/articles/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		if err := db.DB.Delete(&models.Article{}, id).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "削除に失敗しました"})
-			return
-		}
+		db.DB.Delete(&models.Article{}, id)
 		c.JSON(http.StatusOK, gin.H{"message": "削除完了"})
 	})
 
@@ -70,11 +65,9 @@ func SetupRouter() *gin.Engine {
 }
 
 func main() {
-	// データベース初期化
 	db.Init()
 	db.DB.AutoMigrate(&models.Article{})
-
-	// ルーターのセットアップとサーバー起動
+	
 	r := SetupRouter()
 	r.Run(":8080")
 }

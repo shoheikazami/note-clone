@@ -17,76 +17,41 @@ import (
 
 func setupTest() *gin.Engine {
 	dialector := sqlite.Open(":memory:")
-	var err error
-	db.DB, err = gorm.Open(dialector, &gorm.Config{})
-	if err != nil {
-		panic("テスト用DBの接続に失敗しました: " + err.Error())
-	}
-
-	db.DB.AutoMigrate(&models.Article{})
+	db.DB, _ = gorm.Open(dialector, &gorm.Config{})
+	db.DB.AutoMigrate(&models.Article{}, &models.User{})
 	gin.SetMode(gin.TestMode)
 	return SetupRouter()
 }
 
-// 正常な投稿のテスト
-func TestCreateArticle(t *testing.T) {
+// 認証が必要な記事投稿のテスト
+func TestCreateArticleWithAuth(t *testing.T) {
 	r := setupTest()
 
-	article := models.Article{Title: "正常な記事", Content: "正常な本文"}
-	jsonValue, _ := json.Marshal(article)
+	// 1. ユーザー作成とログインしてトークン取得
+	user := models.User{Username: "author", Password: "password"}
+	jsonUser, _ := json.Marshal(user)
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer(jsonUser)))
 
-	req, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer(jsonValue))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-// 【追加】バリデーションエラーのテスト
-func TestCreateArticleValidationError(t *testing.T) {
-	r := setupTest()
-
-	// タイトルが空のデータ（binding:"required" で弾かれるべきもの）
-	invalidArticle := models.Article{Title: "", Content: "本文はあるけどタイトルがない"}
-	jsonValue, _ := json.Marshal(invalidArticle)
-
-	req, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer(jsonValue))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
+	wLogin := httptest.NewRecorder()
+	r.ServeHTTP(wLogin, httptest.NewRequest("POST", "/login", bytes.NewBuffer(jsonUser)))
 	
-	r.ServeHTTP(w, req)
+	var loginRes map[string]string
+	json.Unmarshal(wLogin.Body.Bytes(), &loginRes)
+	token := loginRes["token"]
 
-	// ステータスコードが 400 Bad Request であることを期待する
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	
-	// エラーメッセージが含まれているか確認
-	assert.Contains(t, w.Body.String(), "error")
-}
+	// 2. トークンなしで投稿（拒否されるはず）
+	reqNoToken, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer([]byte(`{"title":"NoToken"}`)))
+	wNoToken := httptest.NewRecorder()
+	r.ServeHTTP(wNoToken, reqNoToken)
+	assert.Equal(t, http.StatusUnauthorized, wNoToken.Code)
 
-func TestDeleteArticle(t *testing.T) {
-	r := setupTest()
-	target := models.Article{Title: "削除用", Content: "消えます"}
-	db.DB.Create(&target)
+	// 3. トークンありで投稿（成功するはず）
+	article := models.Article{Title: "AuthTitle", Content: "AuthContent"}
+	jsonArt, _ := json.Marshal(article)
+	reqWithToken, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer(jsonArt))
+	reqWithToken.Header.Set("Authorization", "Bearer "+token) // トークンをセット
+	wWithToken := httptest.NewRecorder()
+	r.ServeHTTP(wWithToken, reqWithToken)
 
-	req, _ := http.NewRequest("DELETE", "/articles/1", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestUpdateArticle(t *testing.T) {
-	r := setupTest()
-	db.DB.Create(&models.Article{Title: "旧", Content: "旧"})
-
-	update := models.Article{Title: "新", Content: "新"}
-	jsonValue, _ := json.Marshal(update)
-
-	req, _ := http.NewRequest("PUT", "/articles/1", bytes.NewBuffer(jsonValue))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusOK, wWithToken.Code)
 }

@@ -23,12 +23,12 @@ func setupTest() *gin.Engine {
 	return SetupRouter()
 }
 
-// 認証が必要な記事投稿のテスト
-func TestCreateArticleWithAuth(t *testing.T) {
+func TestCreateArticleWithUserBinding(t *testing.T) {
 	r := setupTest()
 
-	// 1. ユーザー作成とログインしてトークン取得
-	user := models.User{Username: "author", Password: "password"}
+	// 1. テストユーザーの作成とログイン
+	username := "test_author"
+	user := models.User{Username: username, Password: "password123"}
 	jsonUser, _ := json.Marshal(user)
 	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/signup", bytes.NewBuffer(jsonUser)))
 
@@ -39,19 +39,31 @@ func TestCreateArticleWithAuth(t *testing.T) {
 	json.Unmarshal(wLogin.Body.Bytes(), &loginRes)
 	token := loginRes["token"]
 
-	// 2. トークンなしで投稿（拒否されるはず）
-	reqNoToken, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer([]byte(`{"title":"NoToken"}`)))
-	wNoToken := httptest.NewRecorder()
-	r.ServeHTTP(wNoToken, reqNoToken)
-	assert.Equal(t, http.StatusUnauthorized, wNoToken.Code)
+	// DBから作成されたユーザーのIDを取得（期待値として使用）
+	var createdUser models.User
+	db.DB.Where("username = ?", username).First(&createdUser)
 
-	// 3. トークンありで投稿（成功するはず）
-	article := models.Article{Title: "AuthTitle", Content: "AuthContent"}
-	jsonArt, _ := json.Marshal(article)
-	reqWithToken, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer(jsonArt))
-	reqWithToken.Header.Set("Authorization", "Bearer "+token) // トークンをセット
-	wWithToken := httptest.NewRecorder()
-	r.ServeHTTP(wWithToken, reqWithToken)
+	// 2. 認証トークンを使って記事を投稿
+	articlePayload := models.Article{Title: "紐付けテスト", Content: "ユーザーIDが入るはず"}
+	jsonArt, _ := json.Marshal(articlePayload)
+	req, _ := http.NewRequest("POST", "/articles", bytes.NewBuffer(jsonArt))
+	req.Header.Set("Authorization", "Bearer "+token)
+	
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusOK, wWithToken.Code)
+	// 3. アサーション（検証）
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var createdArticle models.Article
+	json.Unmarshal(w.Body.Bytes(), &createdArticle)
+
+	// レスポンスの user_id が、ログインしたユーザーの ID と一致するか
+	assert.Equal(t, createdUser.ID, createdArticle.UserID)
+	assert.Equal(t, "紐付けテスト", createdArticle.Title)
+
+	// DB側でもう一度確認（念のため）
+	var dbArticle models.Article
+	db.DB.First(&dbArticle, createdArticle.ID)
+	assert.Equal(t, createdUser.ID, dbArticle.UserID)
 }

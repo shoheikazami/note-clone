@@ -14,7 +14,7 @@ import (
 
 var jwtKey = []byte("your_secret_key")
 
-// 認証チェックを行うミドルウェア
+// 認証ミドルウェア
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -24,7 +24,6 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// "Bearer <token>" の形式を分解
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			return jwtKey, nil
@@ -35,6 +34,13 @@ func AuthMiddleware() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+
+		// トークンから claims（中身）を取り出す
+		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+			// コンテキストにユーザー名を保存して、後のハンドラーで使えるようにする
+			c.Set("username", claims["username"])
+		}
+
 		c.Next()
 	}
 }
@@ -72,7 +78,6 @@ func SetupRouter() *gin.Engine {
 			return
 		}
 
-		// JWTトークンの作成
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 			"username": user.Username,
 			"exp":      time.Now().Add(time.Hour * 24).Unix(),
@@ -97,10 +102,20 @@ func SetupRouter() *gin.Engine {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備"})
 				return
 			}
+
+			// 1. ミドルウェアでセットした username を取得
+			username, _ := c.Get("username")
+
+			// 2. その username に対応する User をDBから取得
+			var user models.User
+			db.DB.Where("username = ?", username).First(&user)
+
+			// 3. 記事に UserID を紐付けて保存
+			article.UserID = user.ID
 			db.DB.Create(&article)
+
 			c.JSON(http.StatusOK, article)
 		})
-		// PUTやDELETEもここに入れると保護されます
 	}
 
 	return r

@@ -22,3 +22,12 @@ go run main.go
 ```bash
 go test -v
 ```
+
+##　今後の展望
+[ ] 環境変数の導入 (.env) による秘密鍵の管理
+
+[ ] go-playground/validator を用いた入力バリデーションの強化
+
+[ ] GORM Preload を用いた、記事一覧への投稿者名表示
+
+[ ] 画像アップロード機能（アイキャッチ画像対応）

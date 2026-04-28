@@ -16,7 +16,9 @@ Go (Gin) を使用した、バックエンド特化型の note クローンプ�
 git clone https://github.com/shoheikazami/note-clone
 go mod download
 go run main.go
+```
 
 ## テスト
 ```bash
 go test -v
+```

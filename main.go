@@ -35,9 +35,7 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// トークンから claims（中身）を取り出す
 		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			// コンテキストにユーザー名を保存して、後のハンドラーで使えるようにする
 			c.Set("username", claims["username"])
 		}
 
@@ -96,24 +94,76 @@ func SetupRouter() *gin.Engine {
 	authorized := r.Group("/")
 	authorized.Use(AuthMiddleware())
 	{
+		// 記事投稿
 		authorized.POST("/articles", func(c *gin.Context) {
 			var article models.Article
 			if err := c.ShouldBindJSON(&article); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備"})
 				return
 			}
-
-			// 1. ミドルウェアでセットした username を取得
 			username, _ := c.Get("username")
-
-			// 2. その username に対応する User をDBから取得
 			var user models.User
 			db.DB.Where("username = ?", username).First(&user)
 
-			// 3. 記事に UserID を紐付けて保存
 			article.UserID = user.ID
 			db.DB.Create(&article)
+			c.JSON(http.StatusOK, article)
+		})
 
+		// 記事削除（認可チェック付き）
+		authorized.DELETE("/articles/:id", func(c *gin.Context) {
+			id := c.Param("id")
+			username, _ := c.Get("username")
+			
+			// 1. 実行ユーザーの特定
+			var user models.User
+			db.DB.Where("username = ?", username).First(&user)
+
+			// 2. 記事の存在確認
+			var article models.Article
+			if err := db.DB.First(&article, id).Error; err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
+				return
+			}
+
+			// 3. 所有権の検証 (Authorization)
+			if article.UserID != user.ID {
+				c.JSON(http.StatusForbidden, gin.H{"error": "他人の記事は操作できません"})
+				return
+			}
+
+			db.DB.Delete(&article)
+			c.JSON(http.StatusOK, gin.H{"message": "削除しました"})
+		})
+
+		// 記事更新（認可チェック付き）
+		authorized.PUT("/articles/:id", func(c *gin.Context) {
+			id := c.Param("id")
+			username, _ := c.Get("username")
+			
+			var user models.User
+			db.DB.Where("username = ?", username).First(&user)
+
+			var article models.Article
+			if err := db.DB.First(&article, id).Error; err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
+				return
+			}
+
+			// 所有権の検証
+			if article.UserID != user.ID {
+				c.JSON(http.StatusForbidden, gin.H{"error": "他人の記事は操作できません"})
+				return
+			}
+
+			// 入力バリデーション
+			var input models.Article
+			if err := c.ShouldBindJSON(&input); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備"})
+				return
+			}
+
+			db.DB.Model(&article).Updates(input)
 			c.JSON(http.StatusOK, article)
 		})
 	}

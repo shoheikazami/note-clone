@@ -1,18 +1,22 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"note-clone/db"
 	"note-clone/models"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 )
 
-var jwtKey = []byte("your_secret_key")
+// jwtKeyをグローバル変数として定義（mainで環境変数から値を代入）
+var jwtKey []byte
 
 // 認証ミドルウェア
 func AuthMiddleware() gin.HandlerFunc {
@@ -45,9 +49,8 @@ func AuthMiddleware() gin.HandlerFunc {
 
 func SetupRouter() *gin.Engine {
 	r := gin.Default()
-	r.LoadHTMLGlob("templates/*")
-
-	// --- 認証不要ルート ---
+	
+	// 認証不要ルート
 	r.POST("/signup", func(c *gin.Context) {
 		var input models.User
 		if err := c.ShouldBindJSON(&input); err != nil {
@@ -87,84 +90,41 @@ func SetupRouter() *gin.Engine {
 	r.GET("/articles", func(c *gin.Context) {
 		var articles []models.Article
 		db.DB.Order("id desc").Find(&articles)
-		c.HTML(http.StatusOK, "index.html", gin.H{"articles": articles})
+		c.JSON(http.StatusOK, articles)
 	})
 
-	// --- 認証が必要なルート ---
+	// 認証が必要なルート
 	authorized := r.Group("/")
 	authorized.Use(AuthMiddleware())
 	{
-		// 記事投稿
 		authorized.POST("/articles", func(c *gin.Context) {
 			var article models.Article
-			if err := c.ShouldBindJSON(&article); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備"})
-				return
-			}
+			c.ShouldBindJSON(&article)
 			username, _ := c.Get("username")
 			var user models.User
 			db.DB.Where("username = ?", username).First(&user)
-
 			article.UserID = user.ID
 			db.DB.Create(&article)
 			c.JSON(http.StatusOK, article)
 		})
 
-		// 記事削除（認可チェック付き）
 		authorized.DELETE("/articles/:id", func(c *gin.Context) {
 			id := c.Param("id")
 			username, _ := c.Get("username")
-			
-			// 1. 実行ユーザーの特定
 			var user models.User
 			db.DB.Where("username = ?", username).First(&user)
 
-			// 2. 記事の存在確認
 			var article models.Article
 			if err := db.DB.First(&article, id).Error; err != nil {
 				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
 				return
 			}
-
-			// 3. 所有権の検証 (Authorization)
 			if article.UserID != user.ID {
 				c.JSON(http.StatusForbidden, gin.H{"error": "他人の記事は操作できません"})
 				return
 			}
-
 			db.DB.Delete(&article)
 			c.JSON(http.StatusOK, gin.H{"message": "削除しました"})
-		})
-
-		// 記事更新（認可チェック付き）
-		authorized.PUT("/articles/:id", func(c *gin.Context) {
-			id := c.Param("id")
-			username, _ := c.Get("username")
-			
-			var user models.User
-			db.DB.Where("username = ?", username).First(&user)
-
-			var article models.Article
-			if err := db.DB.First(&article, id).Error; err != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
-				return
-			}
-
-			// 所有権の検証
-			if article.UserID != user.ID {
-				c.JSON(http.StatusForbidden, gin.H{"error": "他人の記事は操作できません"})
-				return
-			}
-
-			// 入力バリデーション
-			var input models.Article
-			if err := c.ShouldBindJSON(&input); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備"})
-				return
-			}
-
-			db.DB.Model(&article).Updates(input)
-			c.JSON(http.StatusOK, article)
 		})
 	}
 
@@ -172,8 +132,29 @@ func SetupRouter() *gin.Engine {
 }
 
 func main() {
+	// 1. 環境変数の読み込み
+	err := godotenv.Load()
+	if err != nil {
+		log.Println(".envファイルが見つかりません。システム環境変数を使用します。")
+	}
+
+	// 2. JWT秘密鍵の設定
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		log.Fatal("JWT_SECRETが設定されていません")
+	}
+	jwtKey = []byte(secret)
+
+	// 3. DB初期化
 	db.Init()
 	db.DB.AutoMigrate(&models.Article{}, &models.User{})
+
+	// 4. ルーターセットアップと起動
 	r := SetupRouter()
-	r.Run(":8080")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Server starting on port %s", port)
+	r.Run(":" + port)
 }

@@ -3,11 +3,12 @@ package main
 import (
 	"log"
 	"net/http"
-	"note-clone/db"
-	"note-clone/models"
 	"os"
 	"strings"
 	"time"
+
+	"note-clone/db"
+	"note-clone/models"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -15,7 +16,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// jwtKeyをグローバル変数として定義（mainで環境変数から値を代入）
 var jwtKey []byte
 
 // 認証ミドルウェア
@@ -49,26 +49,30 @@ func AuthMiddleware() gin.HandlerFunc {
 
 func SetupRouter() *gin.Engine {
 	r := gin.Default()
-	
-	// 認証不要ルート
+
+	// ユーザー登録
 	r.POST("/signup", func(c *gin.Context) {
 		var input models.User
 		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備があります"})
 			return
 		}
 		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 		user := models.User{Username: input.Username, Password: string(hashedPassword)}
 		if err := db.DB.Create(&user).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "登録失敗"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ユーザー名の重複または登録失敗"})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "登録完了"})
 	})
 
+	// ログイン
 	r.POST("/login", func(c *gin.Context) {
 		var input models.User
-		c.ShouldBindJSON(&input)
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備"})
+			return
+		}
 		var user models.User
 		if err := db.DB.Where("username = ?", input.Username).First(&user).Error; err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "認証失敗"})
@@ -87,27 +91,41 @@ func SetupRouter() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 	})
 
+	// 記事一覧取得 (Preloadでユーザー情報も取得)
 	r.GET("/articles", func(c *gin.Context) {
 		var articles []models.Article
-		db.DB.Order("id desc").Find(&articles)
+		if err := db.DB.Preload("User").Order("id desc").Find(&articles).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "記事の取得に失敗しました"})
+			return
+		}
 		c.JSON(http.StatusOK, articles)
 	})
 
-	// 認証が必要なルート
+	// 認証が必要なエンドポイント
 	authorized := r.Group("/")
 	authorized.Use(AuthMiddleware())
 	{
+		// 記事投稿 (バリデーション適用)
 		authorized.POST("/articles", func(c *gin.Context) {
 			var article models.Article
-			c.ShouldBindJSON(&article)
+			if err := c.ShouldBindJSON(&article); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "タイトルと本文は必須です"})
+				return
+			}
+
 			username, _ := c.Get("username")
 			var user models.User
 			db.DB.Where("username = ?", username).First(&user)
+
 			article.UserID = user.ID
-			db.DB.Create(&article)
+			if err := db.DB.Create(&article).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "保存に失敗しました"})
+				return
+			}
 			c.JSON(http.StatusOK, article)
 		})
 
+		// 記事削除 (所有権チェック)
 		authorized.DELETE("/articles/:id", func(c *gin.Context) {
 			id := c.Param("id")
 			username, _ := c.Get("username")
@@ -119,10 +137,12 @@ func SetupRouter() *gin.Engine {
 				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
 				return
 			}
+
 			if article.UserID != user.ID {
-				c.JSON(http.StatusForbidden, gin.H{"error": "他人の記事は操作できません"})
+				c.JSON(http.StatusForbidden, gin.H{"error": "他人の記事は削除できません"})
 				return
 			}
+
 			db.DB.Delete(&article)
 			c.JSON(http.StatusOK, gin.H{"message": "削除しました"})
 		})
@@ -132,29 +152,29 @@ func SetupRouter() *gin.Engine {
 }
 
 func main() {
-	// 1. 環境変数の読み込み
-	err := godotenv.Load()
-	if err != nil {
-		log.Println(".envファイルが見つかりません。システム環境変数を使用します。")
+	// .envの読み込み
+	if err := godotenv.Load(); err != nil {
+		log.Println(".env file not found, using system environment variables")
 	}
 
-	// 2. JWT秘密鍵の設定
+	// 秘密鍵の設定
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		log.Fatal("JWT_SECRETが設定されていません")
+		log.Fatal("JWT_SECRET is not set in environment variables")
 	}
 	jwtKey = []byte(secret)
 
-	// 3. DB初期化
+	// DB初期化とマイグレーション
 	db.Init()
 	db.DB.AutoMigrate(&models.Article{}, &models.User{})
 
-	// 4. ルーターセットアップと起動
+	// サーバー起動
 	r := SetupRouter()
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("Server starting on port %s", port)
+
+	log.Printf("Starting server on port %s...", port)
 	r.Run(":" + port)
 }

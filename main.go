@@ -91,10 +91,23 @@ func SetupRouter() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 	})
 
-	// 記事一覧取得 (Preloadでユーザー情報も取得)
+	// 記事一覧取得（検索機能キーワード対応）
 	r.GET("/articles", func(c *gin.Context) {
+		// クエリパラメータ ?keyword=xxx を取得
+		keyword := c.Query("keyword")
+		
 		var articles []models.Article
-		if err := db.DB.Preload("User").Order("id desc").Find(&articles).Error; err != nil {
+		// ベースとなるクエリを作成
+		query := db.DB.Preload("User").Order("id desc")
+
+		// キーワードがある場合のみ、WHERE句を追加
+		if keyword != "" {
+			searchStr := "%" + keyword + "%"
+			// OR条件でタイトルか本文のいずれかに含まれるものを探す
+			query = query.Where("title LIKE ? OR content LIKE ?", searchStr, searchStr)
+		}
+
+		if err := query.Find(&articles).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "記事の取得に失敗しました"})
 			return
 		}
@@ -105,7 +118,7 @@ func SetupRouter() *gin.Engine {
 	authorized := r.Group("/")
 	authorized.Use(AuthMiddleware())
 	{
-		// 記事投稿 (バリデーション適用)
+		// 記事投稿
 		authorized.POST("/articles", func(c *gin.Context) {
 			var article models.Article
 			if err := c.ShouldBindJSON(&article); err != nil {
@@ -125,7 +138,7 @@ func SetupRouter() *gin.Engine {
 			c.JSON(http.StatusOK, article)
 		})
 
-		// 記事削除 (所有権チェック)
+		// 記事削除
 		authorized.DELETE("/articles/:id", func(c *gin.Context) {
 			id := c.Param("id")
 			username, _ := c.Get("username")
@@ -152,23 +165,19 @@ func SetupRouter() *gin.Engine {
 }
 
 func main() {
-	// .envの読み込み
 	if err := godotenv.Load(); err != nil {
 		log.Println(".env file not found, using system environment variables")
 	}
 
-	// 秘密鍵の設定
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		log.Fatal("JWT_SECRET is not set in environment variables")
 	}
 	jwtKey = []byte(secret)
 
-	// DB初期化とマイグレーション
 	db.Init()
 	db.DB.AutoMigrate(&models.Article{}, &models.User{})
 
-	// サーバー起動
 	r := SetupRouter()
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv" // ページネーションの数値変換に必要
 	"strings"
 	"time"
 
@@ -91,20 +92,29 @@ func SetupRouter() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 	})
 
-	// 記事一覧取得（検索機能 + Preloadによるリレーション取得）
+	// 記事一覧取得（検索機能 + ページネーション対応）
 	r.GET("/articles", func(c *gin.Context) {
-		keyword := c.Query("keyword")
+		// クエリパラメータの取得（デフォルト値: page=1, limit=10）
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+		if page < 1 { page = 1 }
+		if limit < 1 { limit = 10 }
+
+		// Offset (読み飛ばす件数) の計算
+		offset := (page - 1) * limit
+
 		var articles []models.Article
-		
-		// User(投稿者) と LikedBy(いいねした人) を一括取得
 		query := db.DB.Preload("User").Preload("LikedBy").Order("id desc")
 
+		// キーワード検索の併用
+		keyword := c.Query("keyword")
 		if keyword != "" {
 			searchStr := "%" + keyword + "%"
 			query = query.Where("title LIKE ? OR content LIKE ?", searchStr, searchStr)
 		}
 
-		if err := query.Find(&articles).Error; err != nil {
+		// Limit と Offset を適用して取得
+		if err := query.Limit(limit).Offset(offset).Find(&articles).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "記事の取得に失敗しました"})
 			return
 		}
@@ -149,7 +159,6 @@ func SetupRouter() *gin.Engine {
 				return
 			}
 
-			// 中間テーブルをチェックし、既にいいねしていれば解除、なければ追加
 			var count int64
 			db.DB.Table("article_likes").Where("article_id = ? AND user_id = ?", article.ID, user.ID).Count(&count)
 
@@ -190,25 +199,15 @@ func SetupRouter() *gin.Engine {
 
 func main() {
 	if err := godotenv.Load(); err != nil {
-		log.Println(".env file not found, using system environment variables")
+		log.Println(".env file not found")
 	}
 
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		log.Fatal("JWT_SECRET is not set in environment variables")
-	}
-	jwtKey = []byte(secret)
-
+	jwtKey = []byte(os.Getenv("JWT_SECRET"))
 	db.Init()
-	// 自動マイグレーションでモデル間のリレーション（中間テーブル含む）を同期
 	db.DB.AutoMigrate(&models.Article{}, &models.User{})
 
 	r := SetupRouter()
 	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	log.Printf("Starting server on port %s...", port)
+	if port == "" { port = "8080" }
 	r.Run(":" + port)
 }

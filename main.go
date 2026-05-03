@@ -91,19 +91,16 @@ func SetupRouter() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 	})
 
-	// 記事一覧取得（検索機能キーワード対応）
+	// 記事一覧取得（検索機能 + Preloadによるリレーション取得）
 	r.GET("/articles", func(c *gin.Context) {
-		// クエリパラメータ ?keyword=xxx を取得
 		keyword := c.Query("keyword")
-		
 		var articles []models.Article
-		// ベースとなるクエリを作成
-		query := db.DB.Preload("User").Order("id desc")
+		
+		// User(投稿者) と LikedBy(いいねした人) を一括取得
+		query := db.DB.Preload("User").Preload("LikedBy").Order("id desc")
 
-		// キーワードがある場合のみ、WHERE句を追加
 		if keyword != "" {
 			searchStr := "%" + keyword + "%"
-			// OR条件でタイトルか本文のいずれかに含まれるものを探す
 			query = query.Where("title LIKE ? OR content LIKE ?", searchStr, searchStr)
 		}
 
@@ -136,6 +133,33 @@ func SetupRouter() *gin.Engine {
 				return
 			}
 			c.JSON(http.StatusOK, article)
+		})
+
+		// いいね機能 (トグル形式)
+		authorized.POST("/articles/:id/like", func(c *gin.Context) {
+			articleID := c.Param("id")
+			username, _ := c.Get("username")
+
+			var user models.User
+			var article models.Article
+
+			db.DB.Where("username = ?", username).First(&user)
+			if err := db.DB.First(&article, articleID).Error; err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
+				return
+			}
+
+			// 中間テーブルをチェックし、既にいいねしていれば解除、なければ追加
+			var count int64
+			db.DB.Table("article_likes").Where("article_id = ? AND user_id = ?", article.ID, user.ID).Count(&count)
+
+			if count > 0 {
+				db.DB.Model(&article).Association("LikedBy").Delete(&user)
+				c.JSON(http.StatusOK, gin.H{"message": "いいねを解除しました"})
+			} else {
+				db.DB.Model(&article).Association("LikedBy").Append(&user)
+				c.JSON(http.StatusOK, gin.H{"message": "いいねしました"})
+			}
 		})
 
 		// 記事削除
@@ -176,6 +200,7 @@ func main() {
 	jwtKey = []byte(secret)
 
 	db.Init()
+	// 自動マイグレーションでモデル間のリレーション（中間テーブル含む）を同期
 	db.DB.AutoMigrate(&models.Article{}, &models.User{})
 
 	r := SetupRouter()

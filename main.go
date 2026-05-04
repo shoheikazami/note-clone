@@ -1,213 +1,222 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strconv" // ページネーションの数値変換に必要
-	"strings"
+	"strconv"
 	"time"
 
-	"note-clone/db"
-	"note-clone/models"
-
+	"github.com/cloudinary/cloudinary-go/v2"
+	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
-var jwtKey []byte
-
-// 認証ミドルウェア
-func AuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "トークンが必要です"})
-			c.Abort()
-			return
-		}
-
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			return jwtKey, nil
-		})
-
-		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "無効なトークンです"})
-			c.Abort()
-			return
-		}
-
-		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			c.Set("username", claims["username"])
-		}
-
-		c.Next()
-	}
+// --- Models ---
+type User struct {
+	ID       uint   `gorm:"primaryKey" json:"id"`
+	Username string `gorm:"unique;not null" json:"username"`
+	Password string `gorm:"not null" json:"-"`
 }
 
-func SetupRouter() *gin.Engine {
-	r := gin.Default()
+type Article struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Title     string    `gorm:"not null" json:"title"`
+	Content   string    `gorm:"not null" json:"content"`
+	ImageURL  string    `json:"image_url"` // 画像URL保存用
+	UserID    uint      `json:"user_id"`
+	User      User      `json:"user" gorm:"foreignKey:UserID"`
+	LikedBy   []User    `json:"liked_by" gorm:"many2many:article_likes;"`
+	CreatedAt time.Time `json:"created_at"`
+}
 
-	// ユーザー登録
-	r.POST("/signup", func(c *gin.Context) {
-		var input models.User
-		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備があります"})
-			return
-		}
-		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
-		user := models.User{Username: input.Username, Password: string(hashedPassword)}
-		if err := db.DB.Create(&user).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "ユーザー名の重複または登録失敗"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"message": "登録完了"})
-	})
+var db *gorm.DB
 
-	// ログイン
-	r.POST("/login", func(c *gin.Context) {
-		var input models.User
-		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備"})
-			return
-		}
-		var user models.User
-		if err := db.DB.Where("username = ?", input.Username).First(&user).Error; err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "認証失敗"})
-			return
-		}
-		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "認証失敗"})
-			return
-		}
-
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"username": user.Username,
-			"exp":      time.Now().Add(time.Hour * 24).Unix(),
-		})
-		tokenString, _ := token.SignedString(jwtKey)
-		c.JSON(http.StatusOK, gin.H{"token": tokenString})
-	})
-
-	// 記事一覧取得（検索機能 + ページネーション対応）
-	r.GET("/articles", func(c *gin.Context) {
-		// クエリパラメータの取得（デフォルト値: page=1, limit=10）
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
-		if page < 1 { page = 1 }
-		if limit < 1 { limit = 10 }
-
-		// Offset (読み飛ばす件数) の計算
-		offset := (page - 1) * limit
-
-		var articles []models.Article
-		query := db.DB.Preload("User").Preload("LikedBy").Order("id desc")
-
-		// キーワード検索の併用
-		keyword := c.Query("keyword")
-		if keyword != "" {
-			searchStr := "%" + keyword + "%"
-			query = query.Where("title LIKE ? OR content LIKE ?", searchStr, searchStr)
-		}
-
-		// Limit と Offset を適用して取得
-		if err := query.Limit(limit).Offset(offset).Find(&articles).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "記事の取得に失敗しました"})
-			return
-		}
-		c.JSON(http.StatusOK, articles)
-	})
-
-	// 認証が必要なエンドポイント
-	authorized := r.Group("/")
-	authorized.Use(AuthMiddleware())
-	{
-		// 記事投稿
-		authorized.POST("/articles", func(c *gin.Context) {
-			var article models.Article
-			if err := c.ShouldBindJSON(&article); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "タイトルと本文は必須です"})
-				return
-			}
-
-			username, _ := c.Get("username")
-			var user models.User
-			db.DB.Where("username = ?", username).First(&user)
-
-			article.UserID = user.ID
-			if err := db.DB.Create(&article).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "保存に失敗しました"})
-				return
-			}
-			c.JSON(http.StatusOK, article)
-		})
-
-		// いいね機能 (トグル形式)
-		authorized.POST("/articles/:id/like", func(c *gin.Context) {
-			articleID := c.Param("id")
-			username, _ := c.Get("username")
-
-			var user models.User
-			var article models.Article
-
-			db.DB.Where("username = ?", username).First(&user)
-			if err := db.DB.First(&article, articleID).Error; err != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
-				return
-			}
-
-			var count int64
-			db.DB.Table("article_likes").Where("article_id = ? AND user_id = ?", article.ID, user.ID).Count(&count)
-
-			if count > 0 {
-				db.DB.Model(&article).Association("LikedBy").Delete(&user)
-				c.JSON(http.StatusOK, gin.H{"message": "いいねを解除しました"})
-			} else {
-				db.DB.Model(&article).Association("LikedBy").Append(&user)
-				c.JSON(http.StatusOK, gin.H{"message": "いいねしました"})
-			}
-		})
-
-		// 記事削除
-		authorized.DELETE("/articles/:id", func(c *gin.Context) {
-			id := c.Param("id")
-			username, _ := c.Get("username")
-			var user models.User
-			db.DB.Where("username = ?", username).First(&user)
-
-			var article models.Article
-			if err := db.DB.First(&article, id).Error; err != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
-				return
-			}
-
-			if article.UserID != user.ID {
-				c.JSON(http.StatusForbidden, gin.H{"error": "他人の記事は削除できません"})
-				return
-			}
-
-			db.DB.Delete(&article)
-			c.JSON(http.StatusOK, gin.H{"message": "削除しました"})
-		})
+// --- Utils ---
+func uploadToCloudinary(file interface{}) (string, error) {
+	ctx := context.Background()
+	cld, err := cloudinary.NewFromParams(
+		os.Getenv("CLOUDINARY_NAME"),
+		os.Getenv("CLOUDINARY_API_KEY"),
+		os.Getenv("CLOUDINARY_API_SECRET"),
+	)
+	if err != nil {
+		return "", err
 	}
 
-	return r
+	uploadResult, err := cld.Upload.Upload(ctx, file, uploader.UploadParams{})
+	if err != nil {
+		return "", err
+	}
+
+	return uploadResult.SecureURL, nil
+}
+
+// --- Middleware ---
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tokenString := c.GetHeader("Authorization")
+		if tokenString == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
+			c.Abort()
+			return
+		}
+
+		token, _ := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			return []byte(os.Getenv("JWT_SECRET")), nil
+		})
+
+		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+			c.Set("userID", uint(claims["user_id"].(float64)))
+			c.Next()
+		} else {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+			c.Abort()
+		}
+	}
 }
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Println(".env file not found")
+	// 1. Load Env (Render環境では無視されるがローカルでは必要)
+	_ = godotenv.Load()
+
+	// 2. Database Connect
+	var err error
+	db, err = gorm.Open(sqlite.Open("note.db"), &gorm.Config{})
+	if err != nil {
+		log.Fatal("failed to connect database")
+	}
+	db.AutoMigrate(&User{}, &Article{})
+
+	r := gin.Default()
+
+	// --- Routes ---
+
+	// Health Check
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"message": "Note Clone API is running!"})
+	})
+
+	// Signup/Login
+	r.POST("/signup", func(c *gin.Context) {
+		var input struct {
+			Username string `json:"username" binding:"required"`
+			Password string `json:"password" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), 10)
+		user := User{Username: input.Username, Password: string(hashedPassword)}
+		db.Create(&user)
+		c.JSON(http.StatusOK, gin.H{"message": "Signup successful"})
+	})
+
+	r.POST("/login", func(c *gin.Context) {
+		var input struct {
+			Username string `json:"username" binding:"required"`
+			Password string `json:"password" binding:"required"`
+		}
+		c.ShouldBindJSON(&input)
+		var user User
+		db.Where("username = ?", input.Username).First(&user)
+		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+			return
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"user_id": user.ID,
+			"exp":     time.Now().Add(time.Hour * 24).Unix(),
+		})
+		tokenString, _ := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
+		c.JSON(http.StatusOK, gin.H{"token": tokenString})
+	})
+
+	// Articles (Public)
+	r.GET("/articles", func(c *gin.Context) {
+		var articles []Article
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+		offset := (page - 1) * limit
+		keyword := c.Query("keyword")
+
+		query := db.Preload("User").Preload("LikedBy")
+		if keyword != "" {
+			query = query.Where("title LIKE ? OR content LIKE ?", "%"+keyword+"%", "%"+keyword+"%")
+		}
+		query.Offset(offset).Limit(limit).Find(&articles)
+		c.JSON(http.StatusOK, articles)
+	})
+
+	// Protected Routes
+	auth := r.Group("/")
+	auth.Use(AuthMiddleware())
+	{
+		// Create Article with Image
+		auth.POST("/articles", func(c *gin.Context) {
+			title := c.PostForm("title")
+			content := c.PostForm("content")
+			userID := c.MustGet("userID").(uint)
+
+			// Handle Image Upload
+			file, _, err := c.Request.FormFile("image")
+			var imageURL string
+			if err == nil {
+				url, uploadErr := uploadToCloudinary(file)
+				if uploadErr == nil {
+					imageURL = url
+				}
+			}
+
+			article := Article{
+				Title:    title,
+				Content:  content,
+				ImageURL: imageURL,
+				UserID:   userID,
+			}
+			db.Create(&article)
+			c.JSON(http.StatusOK, article)
+		})
+
+		// Like/Unlike Toggle
+		auth.POST("/articles/:id/like", func(c *gin.Context) {
+			articleID := c.Param("id")
+			userID := c.MustGet("userID").(uint)
+			var article Article
+			db.Preload("LikedBy").First(&article, articleID)
+
+			var user User
+			db.First(&user, userID)
+
+			// Toggle Logic
+			isLiked := false
+			for i, u := range article.LikedBy {
+				if u.ID == userID {
+					article.LikedBy = append(article.LikedBy[:i], article.LikedBy[i+1:]...)
+					isLiked = true
+					break
+				}
+			}
+			if !isLiked {
+				article.LikedBy = append(article.LikedBy, user)
+			}
+			db.Save(&article)
+			c.JSON(http.StatusOK, gin.H{"liked": !isLiked})
+		})
 	}
 
-	jwtKey = []byte(os.Getenv("JWT_SECRET"))
-	db.Init()
-	db.DB.AutoMigrate(&models.Article{}, &models.User{})
-
-	r := SetupRouter()
+	// 3. Start Server
 	port := os.Getenv("PORT")
-	if port == "" { port = "8080" }
+	if port == "" {
+		port = "8080"
+	}
 	r.Run(":" + port)
 }

@@ -14,7 +14,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
-	"gorm.io/driver/sqlite"
+	"gorm.io/driver/postgres" // SQLiteからPostgreSQLに変更
 	"gorm.io/gorm"
 )
 
@@ -29,7 +29,7 @@ type Article struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	Title     string    `gorm:"not null" json:"title"`
 	Content   string    `gorm:"not null" json:"content"`
-	ImageURL  string    `json:"image_url"` 
+	ImageURL  string    `json:"image_url"`
 	UserID    uint      `json:"user_id"`
 	User      User      `json:"user" gorm:"foreignKey:UserID"`
 	LikedBy   []User    `json:"liked_by" gorm:"many2many:article_likes;"`
@@ -79,7 +79,6 @@ func AuthMiddleware() gin.HandlerFunc {
 		}
 
 		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			// float64からuintへ変換してセット
 			c.Set("userID", uint(claims["user_id"].(float64)))
 			c.Next()
 		}
@@ -89,8 +88,17 @@ func AuthMiddleware() gin.HandlerFunc {
 func main() {
 	_ = godotenv.Load()
 
+	// --- データベース接続設定の変更 ---
+	// Renderの環境変数 "DATABASE_URL" を使用
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		// ローカル開発用にフォールバック（必要に応じて）
+		log.Fatal("DATABASE_URL is not set")
+	}
+
 	var err error
-	db, err = gorm.Open(sqlite.Open("note.db"), &gorm.Config{})
+	// postgres.Open(dsn) を使用
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		log.Fatal("failed to connect database")
 	}
@@ -99,9 +107,8 @@ func main() {
 	r := gin.Default()
 
 	// --- Routes ---
-
 	r.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "Note Clone API is running!"})
+		c.JSON(http.StatusOK, gin.H{"message": "Note Clone API (PostgreSQL Mode) is running!"})
 	})
 
 	r.POST("/signup", func(c *gin.Context) {
@@ -143,7 +150,6 @@ func main() {
 			return
 		}
 
-		// ペイロードにuser_idを含めるよう修正
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 			"user_id": user.ID,
 			"exp":     time.Now().Add(time.Hour * 24).Unix(),
@@ -159,7 +165,7 @@ func main() {
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
 		offset := (page - 1) * limit
 
-		db.Preload("User").Preload("LikedBy").Offset(offset).Limit(limit).Find(&articles)
+		db.Preload("User").Preload("LikedBy").Order("created_at desc").Offset(offset).Limit(limit).Find(&articles)
 		c.JSON(http.StatusOK, articles)
 	})
 

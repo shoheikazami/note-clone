@@ -1,240 +1,210 @@
 package main
 
 import (
-	"context"
-	"log"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/cloudinary/cloudinary-go/v2"
-	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
+	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
-	"gorm.io/driver/postgres" // SQLiteからPostgreSQLに変更
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 // --- Models ---
+
 type User struct {
-	ID       uint   `gorm:"primaryKey" json:"id"`
-	Username string `gorm:"unique;not null" json:"username"`
-	Password string `gorm:"not null" json:"-"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Username  string    `gorm:"unique;not null" json:"username"`
+	Password  string    `json:"-"` // パスワードはJSONに含めない
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type Article struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
-	Title     string    `gorm:"not null" json:"title"`
-	Content   string    `gorm:"not null" json:"content"`
+	Title     string    `json:"title"`
+	Content   string    `json:"content"`
 	ImageURL  string    `json:"image_url"`
 	UserID    uint      `json:"user_id"`
-	User      User      `json:"user" gorm:"foreignKey:UserID"`
-	LikedBy   []User    `json:"liked_by" gorm:"many2many:article_likes;"`
+	User      User      `gorm:"foreignKey:UserID" json:"user"`
+	LikedBy   []User    `gorm:"many2many:article_likes;" json:"liked_by"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// --- JWT Claims ---
+
+type Claims struct {
+	UserID uint `json:"user_id"`
+	jwt.StandardClaims
+}
+
+var jwtKey = []byte("your_secret_key")
+
+// --- Database ---
+
 var db *gorm.DB
 
-// --- Utils ---
-func uploadToCloudinary(file interface{}) (string, error) {
-	ctx := context.Background()
-	cld, err := cloudinary.NewFromParams(
-		os.Getenv("CLOUDINARY_NAME"),
-		os.Getenv("CLOUDINARY_API_KEY"),
-		os.Getenv("CLOUDINARY_API_SECRET"),
-	)
-	if err != nil {
-		return "", err
+func initDB() {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		panic("DATABASE_URL is not set")
 	}
 
-	uploadResult, err := cld.Upload.Upload(ctx, file, uploader.UploadParams{})
+	var err error
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		return "", err
+		panic("failed to connect database")
 	}
 
-	return uploadResult.SecureURL, nil
+	// ユーザー、記事、および中間テーブルのマイグレーション
+	db.AutoMigrate(&User{}, &Article{})
 }
 
 // --- Middleware ---
+
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenString := c.GetHeader("Authorization")
 		if tokenString == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "トークンが必要です"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header is required"})
 			c.Abort()
 			return
 		}
 
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			return []byte(os.Getenv("JWT_SECRET")), nil
+		claims := &Claims{}
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+			return jwtKey, nil
 		})
 
 		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "無効なトークンです"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 			c.Abort()
 			return
 		}
 
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			c.Set("userID", uint(claims["user_id"].(float64)))
-			c.Next()
-		}
+		c.Set("userID", claims.UserID)
+		c.Next()
 	}
 }
 
+// --- Main ---
+
 func main() {
-	_ = godotenv.Load()
-
-	// --- データベース接続設定の変更 ---
-	// Renderの環境変数 "DATABASE_URL" を使用
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		// ローカル開発用にフォールバック（必要に応じて）
-		log.Fatal("DATABASE_URL is not set")
-	}
-
-	var err error
-	// postgres.Open(dsn) を使用
-	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		log.Fatal("failed to connect database")
-	}
-	db.AutoMigrate(&User{}, &Article{})
+	initDB()
 
 	r := gin.Default()
 
-	// --- Routes ---
+	// 疎通確認用
 	r.GET("/", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "Note Clone API (PostgreSQL Mode) is running!"})
+		c.JSON(http.StatusOK, gin.H{"message": "Note Clone API is running on PostgreSQL!"})
 	})
 
+	// ユーザー登録
 	r.POST("/signup", func(c *gin.Context) {
-		var input struct {
-			Username string `json:"username" binding:"required"`
-			Password string `json:"password" binding:"required"`
-		}
-		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備があります"})
+		var user User
+		if err := c.ShouldBindJSON(&user); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), 10)
-		user := User{Username: input.Username, Password: string(hashedPassword)}
-		if err := db.Create(&user).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "登録に失敗しました"})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"message": "登録完了"})
+		hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
+		user.Password = string(hashedPassword)
+		db.Create(&user)
+		c.JSON(http.StatusOK, gin.H{"message": "Signup successful"})
 	})
 
+	// ログイン
 	r.POST("/login", func(c *gin.Context) {
-		var input struct {
-			Username string `json:"username" binding:"required"`
-			Password string `json:"password" binding:"required"`
-		}
+		var input User
 		if err := c.ShouldBindJSON(&input); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "入力不備があります"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
 		var user User
 		if err := db.Where("username = ?", input.Username).First(&user).Error; err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "認証に失敗しました"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 			return
 		}
 
 		if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "認証に失敗しました"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 			return
 		}
 
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"user_id": user.ID,
-			"exp":     time.Now().Add(time.Hour * 24).Unix(),
-		})
+		expirationTime := time.Now().Add(24 * time.Hour)
+		claims := &Claims{
+			UserID: user.ID,
+			StandardClaims: jwt.StandardClaims{
+				ExpiresAt: expirationTime.Unix(),
+			},
+		}
 
-		tokenString, _ := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		tokenString, _ := token.SignedString(jwtKey)
+
 		c.JSON(http.StatusOK, gin.H{"token": tokenString})
 	})
 
+	// 記事取得（キーワード検索対応）
 	r.GET("/articles", func(c *gin.Context) {
 		var articles []Article
-
-		// クエリパラメータから検索キーワード "q" を取得
 		query := c.Query("q")
-
+		
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
 		offset := (page - 1) * limit
 
-		// DB操作のベースを作成
 		dbQuery := db.Preload("User").Preload("LikedBy")
 
-		// 検索キーワードがある場合、タイトル(title)か内容(content)に部分一致するかを絞り込み
 		if query != "" {
+			// タイトルまたは内容から部分一致検索
 			dbQuery = dbQuery.Where("title ILIKE ? OR content ILIKE ?", "%"+query+"%", "%"+query+"%")
 		}
 
-		// 最終的な取得処理
 		dbQuery.Order("created_at desc").Offset(offset).Limit(limit).Find(&articles)
-
 		c.JSON(http.StatusOK, articles)
 	})
 
+	// 認証が必要なルート
 	auth := r.Group("/")
 	auth.Use(AuthMiddleware())
 	{
+		// 記事投稿
 		auth.POST("/articles", func(c *gin.Context) {
-			title := c.PostForm("title")
-			content := c.PostForm("content")
-			userID := c.MustGet("userID").(uint)
-
-			file, _, err := c.Request.FormFile("image")
-			var imageURL string
-			if err == nil {
-				url, uploadErr := uploadToCloudinary(file)
-				if uploadErr == nil {
-					imageURL = url
-				}
+			var article Article
+			if err := c.ShouldBindJSON(&article); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
 			}
-
-			article := Article{
-				Title:    title,
-				Content:  content,
-				ImageURL: imageURL,
-				UserID:   userID,
-			}
+			article.UserID = c.MustGet("userID").(uint)
 			db.Create(&article)
 			c.JSON(http.StatusOK, article)
 		})
 
+		// いいね機能
 		auth.POST("/articles/:id/like", func(c *gin.Context) {
 			articleID := c.Param("id")
 			userID := c.MustGet("userID").(uint)
 
 			var article Article
 			if err := db.First(&article, articleID).Error; err != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
+				c.JSON(http.StatusNotFound, gin.H{"error": "Article not found"})
 				return
 			}
 
 			var user User
-			if err := db.First(&user, userID).Error; err != nil {
-				c.JSON(http.StatusNotFound, gin.H{"error": "ユーザーが見つかりません"})
-				return
-			}
+			db.First(&user, userID)
 
-			if err := db.Model(&article).Association("LikedBy").Append(&user); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "いいねに失敗しました"})
-				return
-			}
-
-			c.JSON(http.StatusOK, gin.H{"message": "いいねしました", "article_id": article.ID})
+			// 中間テーブルへ保存
+			db.Model(&article).Association("LikedBy").Append(&user)
+			c.JSON(http.StatusOK, gin.H{"message": "Liked successfully"})
 		})
 	}
 
+	// Render用のポート設定
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

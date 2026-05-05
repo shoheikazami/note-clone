@@ -161,11 +161,25 @@ func main() {
 
 	r.GET("/articles", func(c *gin.Context) {
 		var articles []Article
+
+		// クエリパラメータから検索キーワード "q" を取得
+		query := c.Query("q")
+
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
 		offset := (page - 1) * limit
 
-		db.Preload("User").Preload("LikedBy").Order("created_at desc").Offset(offset).Limit(limit).Find(&articles)
+		// DB操作のベースを作成
+		dbQuery := db.Preload("User").Preload("LikedBy")
+
+		// 検索キーワードがある場合、タイトル(title)か内容(content)に部分一致するかを絞り込み
+		if query != "" {
+			dbQuery = dbQuery.Where("title ILIKE ? OR content ILIKE ?", "%"+query+"%", "%"+query+"%")
+		}
+
+		// 最終的な取得処理
+		dbQuery.Order("created_at desc").Offset(offset).Limit(limit).Find(&articles)
+
 		c.JSON(http.StatusOK, articles)
 	})
 
@@ -194,6 +208,30 @@ func main() {
 			}
 			db.Create(&article)
 			c.JSON(http.StatusOK, article)
+		})
+
+		auth.POST("/articles/:id/like", func(c *gin.Context) {
+			articleID := c.Param("id")
+			userID := c.MustGet("userID").(uint)
+
+			var article Article
+			if err := db.First(&article, articleID).Error; err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "記事が見つかりません"})
+				return
+			}
+
+			var user User
+			if err := db.First(&user, userID).Error; err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "ユーザーが見つかりません"})
+				return
+			}
+
+			if err := db.Model(&article).Association("LikedBy").Append(&user); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "いいねに失敗しました"})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{"message": "いいねしました", "article_id": article.ID})
 		})
 	}
 
